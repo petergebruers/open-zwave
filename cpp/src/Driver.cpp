@@ -1358,7 +1358,7 @@ bool Driver::WriteMsg
 		{
 			node->m_sentCnt++;
 			node->m_sentTS.SetTime();
-			if( m_expectedReply == FUNC_ID_APPLICATION_COMMAND_HANDLER )
+			if (m_expectedReply == FUNC_ID_APPLICATION_COMMAND_HANDLER)
 			{
 				CommandClass *cc = node->GetCommandClass(m_expectedCommandClassId);
 				if( cc != NULL )
@@ -2291,6 +2291,12 @@ void Driver::ProcessMsg
 			HandleApplicationCommandHandlerRequest( _data, wasencrypted );
 			break;
 		}
+		case FUNC_ID_APPLICATION_COMMAND_HANDLER_BRIDGE:
+		{
+			Log::Write( LogLevel_Detail, "" );
+			HandleApplicationCommandHandlerBridgeRequest( _data, wasencrypted );
+			break;
+		}
 		case FUNC_ID_ZW_SEND_DATA:
 		{
 			HandleSendDataRequest( _data, _length, false );
@@ -2465,20 +2471,53 @@ void Driver::ProcessMsg
 			}
 			if( m_expectedReply )
 			{
-				if( m_expectedReply == _data[1] )
+				if (m_expectedReply == FUNC_ID_APPLICATION_COMMAND_HANDLER)
 				{
-					if( m_expectedCommandClassId && ( m_expectedReply == FUNC_ID_APPLICATION_COMMAND_HANDLER ) )
+					switch (_data[1])
 					{
-						if( m_expectedCallbackId == 0 && m_expectedCommandClassId == _data[5] && m_expectedNodeId == _data[3] )
+					case FUNC_ID_APPLICATION_COMMAND_HANDLER:
+						if (m_expectedCallbackId == 0 && m_expectedCommandClassId == _data[5] && m_expectedNodeId == _data[3])
 						{
-							Log::Write( LogLevel_Detail, _data[3], "  Expected reply and command class was received" );
+							Log::Write(LogLevel_Detail, _data[3], "  Expected reply and command class was received");
 							m_waitingForAck = false;
 							m_expectedReply = 0;
 							m_expectedCommandClassId = 0;
 							m_expectedNodeId = 0;
 						}
+						else
+						{
+							Log::Write(LogLevel_Detail, _data[3],
+									   "  FUNC_ID_APPLICATION_COMMAND_HANDLER, command class or node ID does not match");
+						}
+						break;
+
+					case FUNC_ID_APPLICATION_COMMAND_HANDLER_BRIDGE:
+						if (m_expectedCallbackId == 0 && m_expectedCommandClassId == _data[6] && m_expectedNodeId == _data[4])
+						{
+							Log::Write(LogLevel_Detail, _data[4], "  Expected reply and command class was received");
+							m_waitingForAck = false;
+							m_expectedReply = 0;
+							m_expectedCommandClassId = 0;
+							m_expectedNodeId = 0;
+						}
+						else
+						{
+							Log::Write(LogLevel_Detail, _data[3],
+									   "  FUNC_ID_APPLICATION_COMMAND_HANDLER_BRIDGE, command class or node ID does not match");
+						}
+						break;
+
+					case FUNC_ID_ZW_SEND_DATA:
+						Log::Write(LogLevel_Detail, _data[3], "  Received reply to FUNC_ID_ZW_SEND_DATA");
+						break;
+					default:
+						Log::Write(LogLevel_Warning, _data[3], "  m_expectedReply = 0x04 but received frame says 0x%02X", _data[1]);
+						break;
 					}
-					else
+				}
+				else if( m_expectedReply == _data[1] )
+				{
+
 					{
 						if( IsExpectedReply( _data[3] ) )
 
@@ -2526,9 +2565,10 @@ void Driver::HandleGetVersionResponse
 	}
 	Log::Write( LogLevel_Info, GetNodeNumber( m_currentMsg ), "Received reply to FUNC_ID_ZW_GET_VERSION:" );
 	Log::Write( LogLevel_Info, GetNodeNumber( m_currentMsg ), "    %s library, version %s", m_libraryTypeName.c_str(), m_libraryVersion.c_str() );
-	if ( !((m_libraryType == ZW_LIB_CONTROLLER_STATIC ) || (m_libraryType == ZW_LIB_CONTROLLER)) ) {
+	if ( !((m_libraryType == ZW_LIB_CONTROLLER_STATIC ) || (m_libraryType == ZW_LIB_CONTROLLER)
+	|| (m_libraryType == ZW_LIB_CONTROLLER_BRIDGE)) ) {
 		Log::Write( LogLevel_Fatal, GetNodeNumber( m_currentMsg), "Z-Wave Interface is not a Supported Library Type: %s", m_libraryTypeName.c_str());
-		Log::Write( LogLevel_Fatal, GetNodeNumber( m_currentMsg), "Z-Wave Interface should be a Static Controller Library Type");
+		Log::Write( LogLevel_Fatal, GetNodeNumber( m_currentMsg), "Z-Wave Interface should be a Static or Brideg Controller Library Type");
 
 		{
 			Notification* notification = new Notification( Notification::Type_UserAlerts );
@@ -3810,6 +3850,99 @@ void Driver::HandleApplicationCommandHandlerRequest
 		if( node != NULL )
 		{
 			node->ApplicationCommandHandler( _data, encrypted );
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// <Driver::HandleApplicationCommandHandlerBridgeRequest>
+// Process a request from the Z-Wave PC interface
+//-----------------------------------------------------------------------------
+void Driver::HandleApplicationCommandHandlerBridgeRequest
+(
+		uint8* _data,
+		bool encrypted
+)
+{
+	// Frame: request, 0xA8, rxStatus, destNode, sourceNode, cmdLength, pCmd, multiDestsOffset_NodeMaskLen,
+	// multiDestsNodeMask, rxRSSIVal
+
+	// Non-bridge version: request, 0x04, rxStatus, sourceNode, cmdLength, pCmd[], rxRSSIVal, securityKey
+
+	uint8 status = _data[2];
+	uint8 nodeId = _data[4];
+	uint8 classId = _data[6];
+	Node* node = GetNodeUnsafe( nodeId );
+
+	if( ( status & RECEIVE_STATUS_ROUTED_BUSY ) != 0 )
+	{
+		m_routedbusy++;
+	}
+	if( ( status & RECEIVE_STATUS_TYPE_BROAD ) != 0 )
+	{
+		m_broadcastReadCnt++;
+	}
+	if( node != NULL )
+	{
+		node->m_receivedCnt++;
+		node->m_errors = 0;
+		int cmp = memcmp( _data, node->m_lastReceivedMessage, sizeof(node->m_lastReceivedMessage));
+		if( cmp == 0 && node->m_receivedTS.TimeRemaining() > -500 )
+		{
+			// if the exact same sequence of bytes are received within 500ms
+			node->m_receivedDups++;
+		}
+		else
+		{
+			memcpy( node->m_lastReceivedMessage, _data, sizeof(node->m_lastReceivedMessage) );
+		}
+		node->m_receivedTS.SetTime();
+		if( m_expectedReply == FUNC_ID_APPLICATION_COMMAND_HANDLER_BRIDGE && m_expectedNodeId == nodeId )
+		{
+			// Need to confirm this is the correct response to the last sent request.
+			// At least ignore any received messages prior to the send data request.
+			node->m_lastResponseRTT = -node->m_sentTS.TimeRemaining();
+
+			if( node->m_averageResponseRTT )
+			{
+				// if the average has been established, update by averaging the average and the last RTT
+				node->m_averageResponseRTT = ( node->m_averageResponseRTT + node->m_lastResponseRTT ) >> 1;
+			}
+			else
+			{
+				// if this is the first observed RTT, set the average to this value
+				node->m_averageResponseRTT = node->m_lastResponseRTT;
+			}
+			Log::Write(LogLevel_Info, nodeId, "Response RTT %d Average Response RTT %d", node->m_lastResponseRTT, node->m_averageResponseRTT );
+		}
+		else
+		{
+			node->m_receivedUnsolicited++;
+		}
+		if ( !node->IsNodeAlive() )
+		{
+			node->SetNodeAlive( true );
+		}
+	}
+	if( ApplicationStatus::StaticGetCommandClassId() == classId )
+	{
+		//TODO: Test this class function or implement
+	}
+	else if( ControllerReplication::StaticGetCommandClassId() == classId )
+	{
+		if( m_controllerReplication && m_currentControllerCommand && ( ControllerCommand_ReceiveConfiguration == m_currentControllerCommand->m_controllerCommand ) )
+		{
+			m_controllerReplication->HandleMsg( &_data[6], _data[4] );
+
+			UpdateControllerState( ControllerState_InProgress );
+		}
+	}
+	else
+	{
+		// Allow the node to handle the message itself
+		if( node != NULL )
+		{
+			node->ApplicationCommandHandler( _data+1, encrypted );
 		}
 	}
 }
@@ -6832,8 +6965,9 @@ uint8 Driver::NodeFromMessage
 	{
 		switch( buffer[3] )
 		{
-		case FUNC_ID_APPLICATION_COMMAND_HANDLER:		nodeId = buffer[5];	break;
-		case FUNC_ID_ZW_APPLICATION_UPDATE:			nodeId = buffer[5];	break;
+		case FUNC_ID_APPLICATION_COMMAND_HANDLER:			nodeId = buffer[5];	break;
+		case FUNC_ID_APPLICATION_COMMAND_HANDLER_BRIDGE:	nodeId = buffer[6];	break;
+		case FUNC_ID_ZW_APPLICATION_UPDATE:					nodeId = buffer[5];	break;
 		}
 	}
 	return nodeId;
