@@ -161,6 +161,7 @@ m_deviceType( 0 ),
 m_role( 0 ),
 m_nodeType ( 0 ),
 m_secured ( false ),
+m_nodeCache ( NULL ),
 m_Product ( NULL ),
 m_fileConfigRevision ( 0 ),
 m_loadedConfigRevision ( 0 ),
@@ -254,6 +255,7 @@ Node::~Node
 		map<uint8,uint8>::iterator it = m_buttonMap.begin();
 		m_buttonMap.erase( it );
 	}
+	delete m_nodeCache;
 }
 
 //-----------------------------------------------------------------------------
@@ -963,6 +965,10 @@ void Node::ReadXML
 			notification->SetHomeAndNodeIds( m_homeId, m_nodeId );
 			GetDriver()->QueueNotification( notification );
 		}
+		if (m_queryStage > QueryStage_CacheLoad )
+		{
+			m_nodeCache = _node->Clone();
+		}
 	}
 
 	str = _node->Attribute( "name" );
@@ -1305,6 +1311,14 @@ void Node::WriteXML
 		TiXmlElement* _driverElement
 )
 {
+	if (m_queryStage <= QueryStage_CacheLoad)
+	{
+		/* Just return our cached copy of the "Cache" as nothing new should be here */
+		_driverElement->LinkEndChild(m_nodeCache->Clone());
+		return;
+	}
+
+
 	char str[32];
 
 	TiXmlElement* nodeElement = new TiXmlElement( "Node" );
@@ -1462,6 +1476,30 @@ void Node::UpdateProtocolInfo
 		m_maxBaudRate = 40000;
 	}
 
+	// Reverse engineered by looking at Zniffer capture of crafted NIF packets
+	// Note 2019-05-19 I have never seen a 200k device, but Zniffer decodes it,
+	// this is not a typo...
+
+	int speed_extension = _data[2] & 0x07;
+
+	switch (speed_extension)
+	{
+	case 0:
+		// No speed_extension
+		break;
+	case 1:
+		m_maxBaudRate = 100000;
+		break;
+	case 2:
+		m_maxBaudRate = 200000;
+		break;
+	default:
+		Log::Write(LogLevel_Warning, m_nodeId,
+				   "  Protocol Info speed_extension = %d is 'Reserved', reported Max Baud Rate might be wrong.",
+				   speed_extension);
+		break;
+	}
+
 	m_version = ( _data[0] & 0x07 ) + 1;
 
 	m_frequentListening = ( ( _data[1] & ( SecurityFlag_Sensor250ms | SecurityFlag_Sensor1000ms ) ) != 0 );
@@ -1520,7 +1558,10 @@ void Node::UpdateProtocolInfo
 			list<uint8> advertisedCommandClasses = CommandClasses::GetAdvertisedCommandClasses();
 			for (list<uint8>::iterator it = advertisedCommandClasses.begin(); it != advertisedCommandClasses.end(); ++it) {
 				CommandClass *cc = AddCommandClass(*it, true);
-				Log::Write( LogLevel_Info, m_nodeId, "    %s", cc->GetCommandClassName().c_str());
+				if ( cc )
+				{
+					Log::Write(LogLevel_Info, m_nodeId, "    %s", cc->GetCommandClassName().c_str());
+				}
 			}
 		}
 
@@ -4139,11 +4180,10 @@ void Node::ReadMetaDataFromXML(TiXmlElement const* _valueElement) {
 							cle.author = entry->Attribute("author");
 							cle.date = entry->Attribute("date");
 							cle.description = entry->GetText();
-							metadata->QueryIntAttribute( "id", &cle.revision );
-							m_changeLog[cle.revision] = cle;
+							entry->QueryIntAttribute( "revision", &cle.revision );
+							m_changeLog.insert(std::pair<uint32_t, ChangeLogEntry>(cle.revision, cle));
 							entry = entry->NextSiblingElement("Entry");
 						}
-
 					}
 					metadata = metadata->NextSiblingElement();
 				}
@@ -4182,7 +4222,7 @@ void Node::WriteMetaDataXML(TiXmlElement *mdElement) {
 	}
 	if (m_changeLog.size() > 0) {
 		TiXmlElement* cl = new TiXmlElement( "ChangeLog" );
-		for (map<uint32_t, ChangeLogEntry>::iterator it = m_changeLog.begin(); it != m_changeLog.end(); ++ it )
+		for (map<uint32_t, ChangeLogEntry>::iterator it = m_changeLog.begin(); it != m_changeLog.end(); ++it )
 		{
 			TiXmlElement* cle = new TiXmlElement( "Entry" );
 			cle->SetAttribute( "author", it->second.author.c_str() );
@@ -4190,6 +4230,7 @@ void Node::WriteMetaDataXML(TiXmlElement *mdElement) {
 			cle->SetAttribute( "revision", it->second.revision );
 			TiXmlText* textElement = new TiXmlText( it->second.description.c_str() );
 			cle->LinkEndChild(textElement);
+			cl->LinkEndChild(cle);
 		}
 		mdElement->LinkEndChild(cl);
 	}
